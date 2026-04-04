@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -25,7 +25,7 @@ function agentAuth(req, res, next) {
 app.post('/command', (req, res) => {
   const { type, payload } = req.body;
   if (!type) return res.status(400).json({ error: 'type is required' });
-  const command = { id: uuidv4(), type, payload, createdAt: Date.now() };
+  const command = { id: crypto.randomUUID(), type, payload, createdAt: Date.now() };
   commandQueue.push(command);
   res.json(command);
 });
