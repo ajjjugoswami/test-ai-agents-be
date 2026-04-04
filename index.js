@@ -1,17 +1,23 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const { google } = require('googleapis');
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
 
 const AGENT_KEY = process.env.AGENT_KEY || 'change-me-secret';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/auth/google/callback';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 // In-memory state
 let commandQueue = [];
 let latestResult = null;
 let lastHeartbeat = 0;
+let googleTokens = null; // Store Google OAuth tokens
 
 // Auth middleware for agent endpoints
 function agentAuth(req, res, next) {
@@ -65,6 +71,127 @@ app.post('/heartbeat', agentAuth, (req, res) => {
 
 app.get('/', (req, res) => {
   res.json({ message: 'PC Control Backend is running' });
+});
+
+// ---- Google OAuth2 ----
+function getOAuth2Client() {
+  return new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
+}
+
+// Start OAuth flow — user visits this URL
+app.get('/auth/google', (req, res) => {
+  if (!GOOGLE_CLIENT_ID) return res.status(500).json({ error: 'Google OAuth not configured' });
+  const oauth2Client = getOAuth2Client();
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: [
+      'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/gmail.compose',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/drive.readonly',
+    ],
+  });
+  res.redirect(url);
+});
+
+// OAuth callback
+app.get('/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('Missing code');
+  try {
+    const oauth2Client = getOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    googleTokens = tokens;
+    // Get user info
+    oauth2Client.setCredentials(tokens);
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const { data } = await oauth2.userinfo.get();
+    googleTokens.email = data.email;
+    googleTokens.name = data.name;
+    googleTokens.picture = data.picture;
+    res.redirect(`${FRONTEND_URL}?google=connected`);
+  } catch (e) {
+    console.error('OAuth error:', e.message);
+    res.redirect(`${FRONTEND_URL}?google=error`);
+  }
+});
+
+// Check connection status
+app.get('/auth/google/status', (req, res) => {
+  if (googleTokens && googleTokens.access_token) {
+    res.json({
+      connected: true,
+      email: googleTokens.email || null,
+      name: googleTokens.name || null,
+      picture: googleTokens.picture || null,
+    });
+  } else {
+    res.json({ connected: false });
+  }
+});
+
+// Agent fetches tokens to use Gmail API
+app.get('/auth/google/tokens', agentAuth, (req, res) => {
+  if (!googleTokens) return res.json(null);
+  res.json(googleTokens);
+});
+
+// Disconnect Google
+app.post('/auth/google/disconnect', (req, res) => {
+  googleTokens = null;
+  res.json({ ok: true });
+});
+
+// Send email via Gmail API (called by agent)
+app.post('/google/gmail/send', agentAuth, async (req, res) => {
+  if (!googleTokens) return res.status(400).json({ error: 'Google not connected' });
+  try {
+    const oauth2Client = getOAuth2Client();
+    oauth2Client.setCredentials(googleTokens);
+    // Refresh if needed
+    if (googleTokens.expiry_date && Date.now() > googleTokens.expiry_date) {
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      googleTokens = { ...googleTokens, ...credentials };
+      oauth2Client.setCredentials(googleTokens);
+    }
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const { to, subject, body } = req.body;
+    const rawMessage = Buffer.from(
+      `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`
+    ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    await gmail.users.messages.send({ userId: 'me', requestBody: { raw: rawMessage } });
+    res.json({ ok: true, message: `Email sent to ${to}` });
+  } catch (e) {
+    console.error('Gmail send error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Create draft via Gmail API
+app.post('/google/gmail/draft', agentAuth, async (req, res) => {
+  if (!googleTokens) return res.status(400).json({ error: 'Google not connected' });
+  try {
+    const oauth2Client = getOAuth2Client();
+    oauth2Client.setCredentials(googleTokens);
+    if (googleTokens.expiry_date && Date.now() > googleTokens.expiry_date) {
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      googleTokens = { ...googleTokens, ...credentials };
+      oauth2Client.setCredentials(googleTokens);
+    }
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const { to, subject, body } = req.body;
+    const rawMessage = Buffer.from(
+      `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`
+    ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    await gmail.users.drafts.create({ userId: 'me', requestBody: { message: { raw: rawMessage } } });
+    res.json({ ok: true, message: `Draft created for ${to}` });
+  } catch (e) {
+    console.error('Gmail draft error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = app;
