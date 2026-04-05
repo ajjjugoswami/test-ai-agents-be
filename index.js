@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { google } = require('googleapis');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
