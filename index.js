@@ -47,8 +47,8 @@ app.get('/command/pending', agentAuth, (req, res) => {
 
 // PC agent posts result
 app.post('/result', agentAuth, (req, res) => {
-  const { commandId, output, screenshot } = req.body;
-  latestResult = { commandId, output, screenshot, receivedAt: Date.now() };
+  const { commandId, output, screenshot, suggestions } = req.body;
+  latestResult = { commandId, output, screenshot, suggestions, receivedAt: Date.now() };
   res.json({ ok: true });
 });
 
@@ -147,16 +147,8 @@ app.post('/auth/google/disconnect', (req, res) => {
 
 // Send email via Gmail API (called by agent)
 app.post('/google/gmail/send', agentAuth, async (req, res) => {
-  if (!googleTokens) return res.status(400).json({ error: 'Google not connected' });
   try {
-    const oauth2Client = getOAuth2Client();
-    oauth2Client.setCredentials(googleTokens);
-    // Refresh if needed
-    if (googleTokens.expiry_date && Date.now() > googleTokens.expiry_date) {
-      const { credentials } = await oauth2Client.refreshAccessToken();
-      googleTokens = { ...googleTokens, ...credentials };
-      oauth2Client.setCredentials(googleTokens);
-    }
+    const oauth2Client = await getAuthedClient();
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     const { to, subject, body } = req.body;
     const rawMessage = Buffer.from(
@@ -172,15 +164,8 @@ app.post('/google/gmail/send', agentAuth, async (req, res) => {
 
 // Create draft via Gmail API
 app.post('/google/gmail/draft', agentAuth, async (req, res) => {
-  if (!googleTokens) return res.status(400).json({ error: 'Google not connected' });
   try {
-    const oauth2Client = getOAuth2Client();
-    oauth2Client.setCredentials(googleTokens);
-    if (googleTokens.expiry_date && Date.now() > googleTokens.expiry_date) {
-      const { credentials } = await oauth2Client.refreshAccessToken();
-      googleTokens = { ...googleTokens, ...credentials };
-      oauth2Client.setCredentials(googleTokens);
-    }
+    const oauth2Client = await getAuthedClient();
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     const { to, subject, body } = req.body;
     const rawMessage = Buffer.from(
@@ -190,6 +175,81 @@ app.post('/google/gmail/draft', agentAuth, async (req, res) => {
     res.json({ ok: true, message: `Draft created for ${to}` });
   } catch (e) {
     console.error('Gmail draft error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Helper to get authenticated OAuth client (refreshes token if needed)
+async function getAuthedClient() {
+  if (!googleTokens) throw new Error('Google not connected');
+  const oauth2Client = getOAuth2Client();
+  oauth2Client.setCredentials(googleTokens);
+  if (googleTokens.expiry_date && Date.now() > googleTokens.expiry_date) {
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    googleTokens = { ...googleTokens, ...credentials };
+    oauth2Client.setCredentials(googleTokens);
+  }
+  return oauth2Client;
+}
+
+// Fetch Gmail inbox messages
+app.get('/google/gmail/inbox', agentAuth, async (req, res) => {
+  try {
+    const oauth2Client = await getAuthedClient();
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const listRes = await gmail.users.messages.list({ userId: 'me', maxResults: 10, labelIds: ['INBOX'] });
+    const messageIds = (listRes.data.messages || []).map(m => m.id);
+    const messages = [];
+    for (const id of messageIds) {
+      const msg = await gmail.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From', 'Subject'] });
+      const headers = msg.data.payload.headers || [];
+      const from = headers.find(h => h.name === 'From')?.value || '';
+      const subject = headers.find(h => h.name === 'Subject')?.value || '';
+      messages.push({ id, from, subject, snippet: msg.data.snippet || '' });
+    }
+    res.json({ messages });
+  } catch (e) {
+    console.error('Gmail inbox error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Google Drive file listing
+app.get('/google/drive/files', agentAuth, async (req, res) => {
+  try {
+    const oauth2Client = await getAuthedClient();
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const q = req.query.q || '';
+    const params = {
+      pageSize: 30,
+      fields: 'files(id, name, mimeType, size, webViewLink, modifiedTime)',
+      orderBy: 'modifiedTime desc',
+    };
+    if (q) params.q = `name contains '${q.replace(/'/g, "\\'")}'`;
+    const listRes = await drive.files.list(params);
+    res.json({ files: listRes.data.files || [] });
+  } catch (e) {
+    console.error('Drive files error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Google Calendar events
+app.get('/google/calendar/events', agentAuth, async (req, res) => {
+  try {
+    const oauth2Client = await getAuthedClient();
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    const now = new Date().toISOString();
+    const eventsRes = await calendar.events.list({
+      calendarId: 'primary',
+      timeMin: now,
+      maxResults: 10,
+      singleEvents: true,
+      orderBy: 'startTime',
+    });
+    res.json({ events: eventsRes.data.items || [] });
+  } catch (e) {
+    console.error('Calendar error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
