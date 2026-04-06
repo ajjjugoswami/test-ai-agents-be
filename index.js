@@ -11,8 +11,8 @@ app.use(express.json({ limit: '100mb' }));
 const AGENT_KEY = process.env.AGENT_KEY || 'change-me-secret';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/auth/google/callback';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3001/auth/google/callback' || "http://192.168.1.21:3001/auth/google/callback";
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000' || "http://192.168.1.21:3000";
 
 // In-memory state
 let commandQueue = [];
